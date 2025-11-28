@@ -1,15 +1,22 @@
+
+ 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 from GoogleNews import GoogleNews
 from datetime import datetime
-import numpy as np # Adicionado para uso em checagens de valores
+import numpy as np
 
 # --- HELPER: GARANTE O SUFIXO .SA ---
 def get_yf_ticker(ticker):
-    """Garante que o ticker da B3 tenha o sufixo .SA, se necessário."""
-    # Garante que não haja sufixo duplicado
-    ticker = ticker.upper().replace(".SA", "")
+    """Garante o sufixo .SA para B3, mas respeita tickers internacionais (ex: AAPL)."""
+    ticker = str(ticker).upper() 
+    
+    # Se o ticker já contiver um ponto (ex: AAPL, .SA), retorna como está
+    if '.' in ticker:
+        return ticker
+    
+    # Adiciona .SA por padrão (para tickers B3)
     return f"{ticker}.SA"
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -34,7 +41,7 @@ with st.sidebar:
     st.code(chave_pix) 
     
     st.caption("Basta copiar a chave acima e colar no seu aplicativo bancário.")
-    st.caption("Qualquer valor é bem-vindo.") # Pequena correção gramatical
+    st.caption("Qualquer valor é bem-vindo.")
     st.caption("Obrigado por seu apoio!")
 
 # --- DISCLAIMER (REFORÇO DA RESPONSABILIDADE) ---
@@ -53,28 +60,22 @@ def carregar_dados_mercado(lista_tickers):
     dados = []
     
     try:
-        # Pega as colunas 'Close' para os 2 últimos dias
         df_historico = yf.download(lista_tickers, period="2d", progress=False)['Close']
         df_historico = df_historico.dropna(axis=1, how='all')
     except Exception as e:
         st.error(f"Erro ao carregar dados do yfinance: {e}")
         return pd.DataFrame()
     
-    # Otimização: Cálculo vetorial de variação
     if len(df_historico) >= 2:
-        # Calcula a variação percentual entre os 2 dias e pega a última linha (do dia atual em relação ao anterior)
-        # Note: A variação do último dia para o penúltimo é a coluna de interesse
         variacoes = df_historico.pct_change().iloc[-1] * 100 
         precos_atuais = df_historico.iloc[-1]
     elif len(df_historico) == 1:
-        # Se só tiver um dia de dados (ex: dia de feriado), a variação é zero
         variacoes = pd.Series(0.0, index=df_historico.columns)
         precos_atuais = df_historico.iloc[-1]
     else:
         return pd.DataFrame() 
         
     for ticker in df_historico.columns:
-        # Ignora tickers sem dados (usando .get para evitar KeyError e pd.isna para NaN)
         preco = precos_atuais.get(ticker)
         variacao = variacoes.get(ticker)
 
@@ -90,36 +91,87 @@ def carregar_dados_mercado(lista_tickers):
     df = pd.DataFrame(dados)
     return df
 
-# --- FUNÇÃO PARA PEGAR DADOS HISTÓRICOS PARA O GRÁFICO ---
-@st.cache_data(ttl=3600) 
-def carregar_dados_historicos(ticker, periodo):
-    try:
-        ticker_yf = get_yf_ticker(ticker) # Usando o helper
-        data = yf.download(ticker_yf, period=periodo, progress=False)
-        return data['Close']
-    except Exception:
-        # Retorna uma Series vazia ou DataFrame vazio, consistente com a checagem abaixo
-        return pd.Series(dtype=float) 
+# --- FUNÇÃO DE ANÁLISE DE SENTIMENTO (SIMULADA) OTIMIZADA ---
+def analisar_sentimento_noticia(titulo):
+    """Classifica o sentimento do título da notícia com termos mais focados em eventos corporativos."""
+    titulo = titulo.lower()
+    
+    # Palavras-chave Positivas (Score +1)
+    positivas = [
+        'alta', 'cresce', 'lucro', 'recorde', 'expansão', 'melhora', 
+        'ganhos', 'supera', 'dividendos', 'juros sobre capital próprio', 
+        'acordo', 'parceria', 'aprova', 'aquisição', 'receita'
+    ]
+    # Palavras-chave Negativas (Score -1)
+    negativas = [
+        'baixa', 'perdas', 'queda', 'cai', 'recuo', 'prejuízo', 'crise', 
+        'problemas', 'alerta', 'risco', 'investigação', 'multa', 'venda de controle', 
+        'rejeita', 'adiamento', 'dívida'
+    ]
+    
+    score = 0
+    for p in positivas:
+        if p in titulo:
+            score += 1
+    for n in negativas:
+        if n in titulo:
+            score -= 1 
+            
+    return score
 
-# --- FUNÇÃO PARA PEGAR DADOS DE DIVIDENDOS NO ÚLTIMO ANO ---
+@st.cache_data(ttl=600) 
+def buscar_noticias_e_sentimento(termo):
+    """Busca notícias focadas em 'Fato Relevante' e calcula o sentimento médio."""
+    googlenews = GoogleNews(lang='pt', region='BR')
+    
+    query = f'"Fato Relevante" {termo} OR notícias {termo} B3'
+    googlenews.search(query) 
+    
+    results = googlenews.results(sort=True)
+    
+    noticias_detalhadas = []
+    scores = []
+    
+    for noticia in results[:7]:
+        score = analisar_sentimento_noticia(noticia.get('title', ''))
+        scores.append(score)
+        noticias_detalhadas.append({
+            **noticia,
+            "score": score
+        })
+        
+    sentimento_medio = np.mean(scores) if scores else 0
+    
+    # Classificação final
+    if sentimento_medio > 0.3:
+        classificacao = "**Otimista**"
+        emoji = "🟢"
+    elif sentimento_medio < -0.3:
+        classificacao = "**Pessimista**"
+        emoji = "🔴"
+    else:
+        classificacao = "**Neutro**"
+        emoji = "🟡"
+        
+    return noticias_detalhadas, classificacao, emoji
+
+# --- FUNÇÕES PARA DIVIDENDOS E FUNDAMENTOS ---
 @st.cache_data(ttl=3600 * 4) 
 def carregar_dados_dividendos(ticker):
-    try:
-        ticker_yf = get_yf_ticker(ticker) # Usando o helper
+    try: 
+        ticker_yf = get_yf_ticker(ticker)
         ativo = yf.Ticker(ticker_yf)
         
-        # Pega o preço atual de forma mais segura
         preco_atual = ativo.fast_info.get('last_price') 
         if preco_atual is None:
-             preco_atual = ativo.fast_info.get('regular_market_price', 0)
+            preco_atual = ativo.fast_info.get('regular_market_price', 0)
         
-        # Pega o histórico de dividendos do último ano ('1y')
-        # Filtra por data
         one_year_ago = datetime.now() - pd.DateOffset(years=1)
         actions_df = ativo.actions
         if actions_df.empty:
             total_pago, dy_anual = 0, 0
         else:
+            # Esta seção estava correta, garantindo que o loc[] funcionasse
             dividendos_df = actions_df.loc[actions_df.index >= one_year_ago]
             pagamentos = dividendos_df[dividendos_df['Dividends'] > 0]
             total_pago = pagamentos['Dividends'].sum()
@@ -128,38 +180,125 @@ def carregar_dados_dividendos(ticker):
             if preco_atual and preco_atual != 0:
                 dy_anual = (total_pago / preco_atual) * 100
                 
-        return preco_atual, total_pago, dy_anual
+        return preco_atual, total_pago, dy_anual 
         
-    except Exception:
+    except Exception: 
         return 0, 0, 0
         
-# --- FUNÇÃO PARA PEGAR FUNDAMENTOS ESSENCIAIS ---
 @st.cache_data(ttl=3600 * 4) 
 def carregar_fundamentos_essenciais(ticker):
     try:
-        ticker_yf = get_yf_ticker(ticker) # Usando o helper
+        ticker_yf = get_yf_ticker(ticker)
         ativo = yf.Ticker(ticker_yf)
         info = ativo.info
         
-        # P/L: Usa forwardPE (expectativa) se disponível, senão trailingPE (histórico)
         pl = info.get('forwardPE') if info.get('forwardPE') is not None else info.get('trailingPE')
         pvpa = info.get('priceToBook')
         vpa = info.get('bookValue')
         
         return pl, pvpa, vpa
     except Exception:
-        # Retorna None para os indicadores em caso de erro
         return None, None, None
 
+# --- FUNÇÕES PARA O INDICADOR MMS 20 (CURTO PRAZO) ---
+@st.cache_data(ttl=3600) 
+def carregar_historico_curto(ticker, dias=30):
+    """Carrega dados para calcular indicadores de curto prazo (MMS 20 e IFR)."""
+    ticker_yf = get_yf_ticker(ticker) 
+    # Usa '6mo' (6 meses) para garantir que temos dados suficientes para IFR (14 dias) e MMS (20 dias)
+    try:
+        # Retorna a série de Fechamento (Close)
+        data = yf.download(ticker_yf, period="6mo", progress=False)['Close']
+        return data.dropna()
+    except Exception:
+        return pd.Series(dtype=float) 
 
-# --- FUNÇÃO PARA PEGAR NOTÍCIAS (Busca refinada) ---
-@st.cache_data(ttl=600) 
-def buscar_noticias(termo):
-    googlenews = GoogleNews(lang='pt', region='BR')
-    # Busca refinada para o mercado brasileiro
-    googlenews.search(f"Notícias {termo} B3") 
-    result = googlenews.results(sort=True)
-    return result[:5]
+def calcular_sinal_mms20(df_historico):
+    """Calcula e retorna o sinal de tendência com base na Média Móvel Simples de 20 dias."""
+    # 1. Checagem primária
+    if df_historico.empty or len(df_historico) < 20:
+        return "Dados Insuficientes para Análise", "⚪", pd.Series(dtype=float)
+
+    # 2. Cálculo da MMS 20
+    mms_20_series = df_historico.rolling(window=20).mean()
+    
+    # 3. Checagem se o cálculo resultou em algo (o último valor não pode ser NaN)
+    if mms_20_series.empty or pd.isna(mms_20_series.iloc[-1]).item():
+        return "Dados Insuficientes para Análise", "⚪", pd.Series(dtype=float)
+
+    # 4. Extração segura dos valores
+    try:
+        preco_atual = df_historico.iloc[-1].item()
+        mms_20 = mms_20_series.iloc[-1].item()
+    except Exception:
+        # Fallback de segurança se algo der errado na indexação
+        return "Erro de Indexação", "⚪", pd.Series(dtype=float)
+
+    # 5. Análise de Sinal
+    diff = (preco_atual - mms_20) / mms_20 * 100
+
+    if preco_atual > mms_20 * 1.01: 
+        sinal = f"**ALTA Confirmada** (Preço está {diff:.2f}% acima da MMS 20)"
+        emoji = "🟢"
+    elif preco_atual < mms_20 * 0.99: 
+        sinal = f"**QUEDA Confirmada** (Preço está {abs(diff):.2f}% abaixo da MMS 20)"
+        emoji = "🔴"
+    else:
+        sinal = f"**NEUTRO** (Preço está próximo da MMS 20)"
+        emoji = "🟡"
+        
+    return sinal, emoji, mms_20_series
+
+# --- FUNÇÕES PARA O INDICADOR IFR (Índice de Força Relativa) ---
+def calcular_rsi(df_historico, window=14):
+    """Calcula o Índice de Força Relativa (IFR) para uma janela (padrão 14)."""
+    if df_historico.empty or len(df_historico) < window + 1: 
+        return pd.Series(dtype=float), None
+
+    delta = df_historico.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+
+    avg_gain = gain.ewm(com=window - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=window - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan) 
+    rsi_series = 100 - (100 / (1 + rs))
+
+    # Tratamento seguro para extrair o valor escalar final
+    if not rsi_series.empty:
+        try:
+            # Garante que o último valor é um escalar (float)
+            rsi_last_value = rsi_series.iloc[-1].item() 
+            if not pd.isna(rsi_last_value):
+                rsi_atual = rsi_last_value
+            else:
+                rsi_atual = None
+        except (ValueError, IndexError, AttributeError): 
+            # Captura se .item() falhar ou se houver erro de indexação
+            rsi_atual = None
+    else:
+        rsi_atual = None
+    
+    return rsi_series, rsi_atual
+
+def calcular_sinal_rsi(rsi_atual):
+    """Interpreta o sinal de sobrecompra/sobrevenda do IFR."""
+    if pd.isna(rsi_atual) or rsi_atual is None:
+        return "Dados Insuficientes para IFR", "⚪"
+
+    if rsi_atual > 70:
+        sinal = f"**SOBRECOMPRA** (IFR = {rsi_atual:.2f}). Risco de correção."
+        emoji = "⚠️"
+    elif rsi_atual < 30:
+        sinal = f"**SOBREVENDA** (IFR = {rsi_atual:.2f}). Potencial de recuperação."
+        emoji = "📈"
+    else:
+        sinal = f"**NEUTRO** (IFR = {rsi_atual:.2f}). Sem sinal extremo de sobrecompra/venda."
+        emoji = "⚪"
+        
+    return sinal, emoji
+
 
 # --- CARREGANDO E EXIBINDO DADOS INICIAIS ---
 with st.spinner('Carregando cotações das Blue Chips...'):
@@ -167,91 +306,127 @@ with st.spinner('Carregando cotações das Blue Chips...'):
 
 # Verifica se o DataFrame não está vazio
 if not df_mercado.empty:
-    # Ordenando
+    def color_change(val):
+        color = 'green' if val > 0 else 'red' if val < 0 else 'gray'
+        return f'color: {color}'
+        
     maiores_altas = df_mercado.sort_values(by="Variação %", ascending=False).head(5)
     maiores_baixas = df_mercado.sort_values(by="Variação %", ascending=True).head(5)
 
-    # --- LAYOUT DAS TABELAS ---
     col1, col2 = st.columns(2)
 
     with col1:
         st.subheader("🚀 Maiores Altas (Top 5)")
-        # Corrigido o formatador para aceitar um ponto flutuante em vez de string
-        st.dataframe(maiores_altas.style.format({"Variação %": "{:.2f}%", "Preço (R$)": "R$ {:.2f}"}), use_container_width=True)
+        df_altas_style = maiores_altas.style.applymap(
+                color_change, subset=['Variação %']
+            ).format({
+                "Variação %": "{:+.2f}%", 
+                "Preço (R$)": "R$ {:.2f}"
+            })
+        st.dataframe(df_altas_style, use_container_width=True)
 
     with col2:
         st.subheader("🔻 Maiores Baixas (Top 5)")
-        st.dataframe(maiores_baixas.style.format({"Variação %": "{:.2f}%", "Preço (R$)": "R$ {:.2f}"}), use_container_width=True)
+        df_baixas_style = maiores_baixas.style.applymap(
+                color_change, subset=['Variação %']
+            ).format({
+                "Variação %": "{:+.2f}%", 
+                "Preço (R$)": "R$ {:.2f}"
+            })
+        st.dataframe(df_baixas_style, use_container_width=True)
 
 st.divider()
 
-# --- SEÇÃO DE PESQUISA, DETALHES, GRÁFICO E NOTÍCIAS ---
+# --- SEÇÃO DE PESQUISA E DETALHES ---
 st.header("🕵️‍♂️ Investigar Outros Ativos")
 
-# 1. Campo de Pesquisa para qualquer ativo
-search_col, _ = st.columns([1, 3])
-with search_col:
-    # O helper get_yf_ticker já cuida do replace e uppercase, mas mantemos o básico na UI
-    termo_busca = st.text_input("Digite o código do ativo (ex: AZUL4, TOTS3)", "").strip().upper() 
+# 1. Campo de Pesquisa para qualquer ativo COM BOTÃO
+col_input, col_btn = st.columns([3, 1])
 
-# Determina o ativo para análise
-ativo_analise = None
+with col_input:
+    termo_busca = st.text_input("Digite o código do ativo (ex: AZUL4, TOTS3)", "", key="input_busca").strip().upper() 
+
+with col_btn:
+    st.markdown("<br>", unsafe_allow_html=True) 
+    st.button("🔍 Pesquisar", key="btn_pesquisa", use_container_width=True)
+
+# --- DETERMINAÇÃO DO ATIVO PARA ANÁLISE (ESTABILIZADO) ---
+ativo_analise = None 
+
+# 1. Prioridade: Busca Manual (termo_busca)
 if termo_busca:
     ativo_analise = termo_busca
-else:
+        
+# 2. Secundário: Selectbox/Ativo Padrão (só se NADA foi digitado)
+elif not df_mercado.empty:
     st.subheader("Ou escolha um ativo da lista:")
-    # Garante que o df_mercado não esteja vazio antes de tentar o selectbox
-    if not df_mercado.empty:
-        # Verifica se o ativo da lista está disponível (caso a lista seja grande e o último tenha saído)
-        opcoes = df_mercado['Ativo'].unique()
-        if len(opcoes) > 0:
-            ativo_analise = st.selectbox("Escolha um ativo para ver detalhes:", opcoes, index=0)
+    opcoes_select = df_mercado['Ativo'].unique()
     
-# Inicia a análise se houver um ativo válido
+    if len(opcoes_select) > 0:
+        
+        # 1. Define o valor inicial/index para o selectbox
+        if "selectbox_selecionado" not in st.session_state or st.session_state["selectbox_selecionado"] not in opcoes_select:
+             st.session_state["selectbox_selecionado"] = opcoes_select[0] 
+            
+        # Pega o índice do ativo que está atualmente no st.session_state
+        index_selecionado = list(opcoes_select).index(st.session_state["selectbox_selecionado"])
+
+        # 2. Renderiza o selectbox
+        ativo_analise = st.selectbox(
+            "Escolha um ativo para ver detalhes:", 
+            opcoes_select, 
+            index=index_selecionado, 
+            key="selectbox_selecionado"
+        )
+
+# --- BLOCO DE ANÁLISE DETALHADA ---
+ticker_valido = False
+ativo_analise_display = ativo_analise
+
 if ativo_analise:
     ticker_yf_analise = get_yf_ticker(ativo_analise)
     
-    # 🌟 Tratamento de Erro para Ticker Inválido
     try:
-        # Tentativa de carregar info para testar a validade do ticker
         info_teste = yf.Ticker(ticker_yf_analise).info 
-        # Uma checagem adicional: se o dict 'info' for muito pequeno, pode ser um ticker inválido (ex: 'Não Encontrado')
-        if not info_teste or len(info_teste) < 5: 
-             raise ValueError("Ticker não encontrado ou sem dados suficientes.")
+        
+        if info_teste and len(info_teste) >= 5 and 'regularMarketPrice' in info_teste: 
+            ticker_valido = True
+            
+            if 'longName' in info_teste:
+                 ativo_analise_display = info_teste['longName']
+            
+        else:
+            raise ValueError("Ticker não encontrado ou sem dados suficientes.")
             
     except Exception:
         st.error(f"Não foi possível encontrar o ativo **{ativo_analise}** na base de dados do mercado. Verifique o código.")
-        ativo_analise = None # Para parar a execução do bloco
+        ticker_valido = False 
         
-if ativo_analise: # Repete a verificação após o teste de erro
-    st.markdown(f"### Detalhes e Fundamentos de **{ativo_analise}**")
+if ticker_valido:
+    st.markdown(f"### Detalhes e Fundamentos de **{ativo_analise_display}**")
     
-    # --- 3. DADOS DE COTAÇÃO, DIVIDENDOS E FUNDAMENTOS ---
-    preco_atual, total_div, dy_anual = carregar_dados_dividendos(ativo_analise)
-    pl, pvpa, vpa = carregar_fundamentos_essenciais(ativo_analise)
-    
-    # CORREÇÃO/OTIMIZAÇÃO: Esta função precisava de ajustes para P/L negativo/zero.
     def formatar_valor(valor, formato, eh_pl=False):
-        # Para P/L (eh_pl=True), considera None, inf e valores <= 0 como "N/A"
         if eh_pl:
             if valor is None or np.isinf(valor) or valor <= 0:
                 return "N/A"
-        # Para outros valores (P/VPA, VPA), considera None ou inf como "N/A"
         elif valor is None or np.isinf(valor):
             return "N/A"
         
-        # Formata o valor se for um número válido
         try:
-            return formato.format(valor)
+            return formato.format(valor).replace(',', 'X').replace('.', ',').replace('X', '.')
         except (ValueError, TypeError):
-             return "N/A"
-        
+            return "N/A"
+            
+    # --- DADOS DE COTAÇÃO, DIVIDENDOS E FUNDAMENTOS ---
+    preco_actual, total_div, dy_anual = carregar_dados_dividendos(ativo_analise)
+    pl, pvpa, vpa = carregar_fundamentos_essenciais(ativo_analise)
+    
     # PRIMEIRA LINHA DE MÉTRICAS (Preço e Dividendos)
     st.subheader("Informações de Preço e Renda")
-    col_p1, col_p2, col_p3 = st.columns(3)
+    col_p1, col_p2, col_p3 = st.columns(3) 
     
     with col_p1:
-        st.metric(label="Preço Atual (R$)", value=formatar_valor(preco_atual, "R$ {:.2f}"))
+        st.metric(label="Preço Atual (R$)", value=formatar_valor(preco_actual, "R$ {:.2f}"))
         
     with col_p2:
         st.metric(label="Total de Dividendos (12m)", value=formatar_valor(total_div, "R$ {:.2f}"))
@@ -261,12 +436,14 @@ if ativo_analise: # Repete a verificação após o teste de erro
         
     st.markdown("---") 
 
-    # SEGUNDA LINHA DE MÉTRICAS (Fundamentos)
-    st.subheader("Indicadores de Valorização")
-    col_f1, col_f2, col_f3 = st.columns(3)
+    # SEGUNDA LINHA DE MÉTRICAS (Fundamentos e Sentimento)
+    st.subheader("Indicadores de Valorização e Sentimento")
+    
+    noticias_detalhe, classificacao_sentimento, emoji_sentimento = buscar_noticias_e_sentimento(ativo_analise)
+
+    col_f1, col_f2, col_f3, col_s = st.columns(4) 
     
     with col_f1:
-        # Usando eh_pl=True para tratar P/L de forma especial
         st.metric(label="P/L (Preço/Lucro)", value=formatar_valor(pl, "{:.2f}x", eh_pl=True))
 
     with col_f2:
@@ -275,56 +452,99 @@ if ativo_analise: # Repete a verificação após o teste de erro
     with col_f3:
         st.metric(label="VPA (Valor Patrimonial/Ação)", value=formatar_valor(vpa, "R$ {:.2f}"))
         
+    with col_s:
+        st.metric(label="Análise Sentimento (IA)", value=f"{emoji_sentimento} {classificacao_sentimento}")
+        
     st.divider()
     
-    # --- GRÁFICO ---
-    st.subheader(f"📈 Desempenho Histórico de {ativo_analise}")
+    # --- BLOCO DE ANÁLISE DE TENDÊNCIA DE CURTO PRAZO (MMS 20) ---
+    st.subheader(f"📈 Análise Técnica ({ativo_analise})")
     
-    periodo_grafico = st.selectbox(
-        "Selecione o período do gráfico:",
-        options=["1mo", "3mo", "6mo", "1y", "5y", "max"],
-        format_func=lambda x: {
-            "1mo": "1 Mês", "3mo": "3 Meses", "6mo": "6 Meses",
-            "1y": "1 Ano", "5y": "5 Anos", "max": "Máximo"
-        }.get(x, x),
-        key="periodo_grafico_detalhe"
-    )
+    df_historico_curto = carregar_historico_curto(ativo_analise)
     
-    df_historico_ativo = carregar_dados_historicos(ativo_analise, periodo_grafico)
+    # 1. MMS 20
+    sinal_mms, emoji_mms, mms_20_series = calcular_sinal_mms20(df_historico_curto)
     
-    # Checagem mais robusta (pd.Series também tem .empty)
-    if not df_historico_ativo.empty and len(df_historico_ativo) > 1:
-        st.line_chart(df_historico_ativo)
-    else:
-        st.info(f"Não foi possível carregar o histórico de preços para {ativo_analise} no período selecionado.")
+    st.markdown(f"#### {emoji_mms} Média Móvel Simples de 20 Dias")
+    st.markdown(sinal_mms)
+    st.caption("Compara o preço atual com a média dos últimos 20 dias úteis.")
+    
+    # EXIBIÇÃO DO GRÁFICO MMS 20 
+    if not df_historico_curto.empty and len(mms_20_series) > 0 and not mms_20_series.empty:
+        st.markdown("##### Visualização da Tendência (MMS 20)")
+        
+        # Garante que os arrays sejam 1D para evitar erros de dimensão
+        df_plot = pd.DataFrame({
+            'Preço de Fechamento': df_historico_curto.values.ravel(),
+            'MMS 20 Períodos': mms_20_series.values.ravel()
+        }, index=df_historico_curto.index) 
+        
+        df_plot = df_plot.dropna() # Remove NaNs iniciais da MMS 20
+        
+        if not df_plot.empty:
+            st.line_chart(df_plot.tail(60)) 
+        else:
+             st.info("Não foi possível carregar dados suficientes para plotar o MMS 20.")
 
+    else:
+         st.info("Não foi possível carregar dados suficientes para calcular e plotar o MMS 20 (Requer 20 dias).")
+
+
+    st.markdown("---")
+    
+    # --- BLOCO DE ANÁLISE IFR ---
+    # 2. IFR 14
+    rsi_series, rsi_atual = calcular_rsi(df_historico_curto)
+    sinal_rsi, emoji_rsi = calcular_sinal_rsi(rsi_atual)
+
+    st.markdown(f"#### {emoji_rsi} Índice de Força Relativa (IFR 14)")
+    st.markdown(sinal_rsi)
+    st.caption("Valores acima de 70 indicam sobrecompra; abaixo de 30, sobrevenda.")
+    
+    # Exibição do Gráfico IFR
+    if not rsi_series.empty:
+        st.markdown("##### Visualização do IFR")
+        
+        # CORREÇÃO APLICADA: Usa .values.ravel() para garantir que a Series seja 1D e passa o índice
+        df_rsi_plot = pd.DataFrame({
+            'IFR 14': rsi_series.values.ravel(),
+            'Sobrecompra (70)': np.full(len(rsi_series), 70),
+            'Sobrevenda (30)': np.full(len(rsi_series), 30)
+        }, index=rsi_series.index).tail(60)
+
+        st.line_chart(df_rsi_plot)
+    else:
+        st.info("Não foi possível carregar dados suficientes para calcular e exibir o IFR.")
+        
     st.divider()
     
-    # --- NOTÍCIAS ---
-    st.subheader(f"📰 Últimas Notícias sobre {ativo_analise}")
-    st.write(f"Buscando últimas notícias sobre **{ativo_analise}** no Google News...")
+    # --- NOTÍCIAS (Fatos Relevantes) ---
+    st.subheader(f"📰 Últimas Notícias sobre {ativo_analise_display} (Foco em Fatos Relevantes)")
     
-    noticias = buscar_noticias(ativo_analise)
-    
-    if noticias:
-        for noticia in noticias:
+    if noticias_detalhe:
+        for noticia in noticias_detalhe:
+            
+            score = noticia.get("score", 0)
+            if score > 0:
+                score_str = f"| **Sentimento:** Positivo ({score})"
+            elif score < 0:
+                score_str = f"| **Sentimento:** Negativo ({score})"
+            else:
+                score_str = "| **Sentimento:** Neutro"
+
             with st.expander(f"📰 {noticia['title']}"):
-                # O GoogleNews pode não retornar 'media' ou 'date'
                 fonte = noticia.get('media', 'Fonte Desconhecida')
                 data = noticia.get('date', 'Data Desconhecida')
                 
                 st.write(f"**Fonte:** {fonte}")
-                st.write(f"**Data:** {data}")
+                st.write(f"**Data:** {data} {score_str}")
                 st.markdown(f"[Ler notícia completa]({noticia['link']})")
     else:
-        st.warning(f"Nenhuma notícia recente encontrada para {ativo_analise} nas últimas horas.")
+        st.warning(f"Nenhuma notícia recente focada em Fato Relevante encontrada para {ativo_analise_display}.")
 
 else:
-    # Mensagem se o DataFrame inicial estiver vazio (ex: yfinance fora do ar)
     if df_mercado.empty:
-        st.error("Não foi possível carregar os dados iniciais do mercado. Tente novamente mais tarde.")
-    elif termo_busca:
-         # Mensagem mais clara se o usuário tentou buscar, mas falhou
-         pass # A mensagem de erro específica já foi exibida acima
+        st.error("Não foi possível carregar os dados iniciais do mercado. Verifique sua conexão ou tente mais tarde.")
     else:
-        st.info("Digite um código de ativo ou escolha um da lista para iniciar a análise detalhada.")
+        st.info("Digite um código de ativo ou escolha um da lista para iniciar a análise detalhada.")     
+
