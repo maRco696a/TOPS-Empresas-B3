@@ -1,0 +1,1 @@
+Quero lhe dar boas vindas sé voce chegou até aqui. Este progeto e para ajudar pessoas a conssutar melhor seus investimentos, pois este sistema estar passando por melhorias para que posssa ficar au seu querer 
