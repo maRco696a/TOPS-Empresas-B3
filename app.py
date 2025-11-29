@@ -1,3 +1,5 @@
+
+ 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -5,17 +7,16 @@ from GoogleNews import GoogleNews
 from datetime import datetime
 import numpy as np
 
-# NÚMERO DE DIAS DE PREGÃO EM 12 MESES (Aprox.)
-MMS_LONG_PERIOD = 252 
-
 # --- HELPER: GARANTE O SUFIXO .SA ---
 def get_yf_ticker(ticker):
     """Garante o sufixo .SA para B3, mas respeita tickers internacionais (ex: AAPL)."""
     ticker = str(ticker).upper() 
     
+    # Se o ticker já contiver um ponto (ex: AAPL, .SA), retorna como está
     if '.' in ticker:
         return ticker
     
+    # Adiciona .SA por padrão (para tickers B3)
     return f"{ticker}.SA"
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -95,11 +96,13 @@ def analisar_sentimento_noticia(titulo):
     """Classifica o sentimento do título da notícia com termos mais focados em eventos corporativos."""
     titulo = titulo.lower()
     
+    # Palavras-chave Positivas (Score +1)
     positivas = [
         'alta', 'cresce', 'lucro', 'recorde', 'expansão', 'melhora', 
         'ganhos', 'supera', 'dividendos', 'juros sobre capital próprio', 
         'acordo', 'parceria', 'aprova', 'aquisição', 'receita'
     ]
+    # Palavras-chave Negativas (Score -1)
     negativas = [
         'baixa', 'perdas', 'queda', 'cai', 'recuo', 'prejuízo', 'crise', 
         'problemas', 'alerta', 'risco', 'investigação', 'multa', 'venda de controle', 
@@ -139,6 +142,7 @@ def buscar_noticias_e_sentimento(termo):
         
     sentimento_medio = np.mean(scores) if scores else 0
     
+    # Classificação final
     if sentimento_medio > 0.3:
         classificacao = "**Otimista**"
         emoji = "🟢"
@@ -167,6 +171,7 @@ def carregar_dados_dividendos(ticker):
         if actions_df.empty:
             total_pago, dy_anual = 0, 0
         else:
+            # Esta seção estava correta, garantindo que o loc[] funcionasse
             dividendos_df = actions_df.loc[actions_df.index >= one_year_ago]
             pagamentos = dividendos_df[dividendos_df['Dividends'] > 0]
             total_pago = pagamentos['Dividends'].sum()
@@ -174,7 +179,7 @@ def carregar_dados_dividendos(ticker):
             dy_anual = 0
             if preco_atual and preco_atual != 0:
                 dy_anual = (total_pago / preco_atual) * 100
-                 
+                
         return preco_atual, total_pago, dy_anual 
         
     except Exception: 
@@ -195,49 +200,54 @@ def carregar_fundamentos_essenciais(ticker):
     except Exception:
         return None, None, None
 
-# --- FUNÇÕES PARA O INDICADOR MMS 252 (LONGO PRAZO) ---
-@st.cache_data(ttl=3600 * 12) 
-def carregar_historico_longo(ticker):
-    """Carrega dados para calcular indicadores de longo prazo (MMS 252 e IFR)."""
+# --- FUNÇÕES PARA O INDICADOR MMS 20 (CURTO PRAZO) ---
+@st.cache_data(ttl=3600) 
+def carregar_historico_curto(ticker, dias=30):
+    """Carrega dados para calcular indicadores de curto prazo (MMS 20 e IFR)."""
     ticker_yf = get_yf_ticker(ticker) 
+    # Usa '6mo' (6 meses) para garantir que temos dados suficientes para IFR (14 dias) e MMS (20 dias)
     try:
-        data = yf.download(ticker_yf, period="2y", progress=False)['Close']
+        # Retorna a série de Fechamento (Close)
+        data = yf.download(ticker_yf, period="6mo", progress=False)['Close']
         return data.dropna()
     except Exception:
         return pd.Series(dtype=float) 
 
-# <<<< FUNÇÃO RENOMEADA PARA EVITAR CONFLITO DE NOME >>>>
-def calcular_sinal_mms_252(df_historico):
-    """Calcula e retorna o sinal de tendência com base na Média Móvel Simples de 252 dias."""
-    
-    if df_historico.empty or len(df_historico) < MMS_LONG_PERIOD:
-        return f"Dados Insuficientes (Requer {MMS_LONG_PERIOD} dias de histórico)", "⚪", pd.Series(dtype=float)
-
-    mms_series = df_historico.rolling(window=MMS_LONG_PERIOD).mean()
-    
-    if mms_series.empty or pd.isna(mms_series.iloc[-1]).item():
+def calcular_sinal_mms20(df_historico):
+    """Calcula e retorna o sinal de tendência com base na Média Móvel Simples de 20 dias."""
+    # 1. Checagem primária
+    if df_historico.empty or len(df_historico) < 20:
         return "Dados Insuficientes para Análise", "⚪", pd.Series(dtype=float)
 
+    # 2. Cálculo da MMS 20
+    mms_20_series = df_historico.rolling(window=20).mean()
+    
+    # 3. Checagem se o cálculo resultou em algo (o último valor não pode ser NaN)
+    if mms_20_series.empty or pd.isna(mms_20_series.iloc[-1]).item():
+        return "Dados Insuficientes para Análise", "⚪", pd.Series(dtype=float)
+
+    # 4. Extração segura dos valores
     try:
         preco_atual = df_historico.iloc[-1].item()
-        mms_longa = mms_series.iloc[-1].item()
+        mms_20 = mms_20_series.iloc[-1].item()
     except Exception:
+        # Fallback de segurança se algo der errado na indexação
         return "Erro de Indexação", "⚪", pd.Series(dtype=float)
 
-    diff = (preco_atual - mms_longa) / mms_longa * 100
+    # 5. Análise de Sinal
+    diff = (preco_atual - mms_20) / mms_20 * 100
 
-    if preco_atual > mms_longa * 1.01: 
-        sinal = f"**TENDÊNCIA DE ALTA** (Preço está {diff:.2f}% acima da MMS {MMS_LONG_PERIOD})"
+    if preco_atual > mms_20 * 1.01: 
+        sinal = f"**ALTA Confirmada** (Preço está {diff:.2f}% acima da MMS 20)"
         emoji = "🟢"
-    elif preco_atual < mms_longa * 0.99: 
-        sinal = f"**TENDÊNCIA DE BAIXA** (Preço está {abs(diff):.2f}% abaixo da MMS {MMS_LONG_PERIOD})"
+    elif preco_atual < mms_20 * 0.99: 
+        sinal = f"**QUEDA Confirmada** (Preço está {abs(diff):.2f}% abaixo da MMS 20)"
         emoji = "🔴"
     else:
-        sinal = f"**TENDÊNCIA NEUTRA** (Preço está próximo da MMS {MMS_LONG_PERIOD})"
+        sinal = f"**NEUTRO** (Preço está próximo da MMS 20)"
         emoji = "🟡"
         
-    return sinal, emoji, mms_series
-
+    return sinal, emoji, mms_20_series
 
 # --- FUNÇÕES PARA O INDICADOR IFR (Índice de Força Relativa) ---
 def calcular_rsi(df_historico, window=14):
@@ -255,14 +265,17 @@ def calcular_rsi(df_historico, window=14):
     rs = avg_gain / avg_loss.replace(0, np.nan) 
     rsi_series = 100 - (100 / (1 + rs))
 
+    # Tratamento seguro para extrair o valor escalar final
     if not rsi_series.empty:
         try:
+            # Garante que o último valor é um escalar (float)
             rsi_last_value = rsi_series.iloc[-1].item() 
             if not pd.isna(rsi_last_value):
                 rsi_atual = rsi_last_value
             else:
                 rsi_atual = None
         except (ValueError, IndexError, AttributeError): 
+            # Captura se .item() falhar ou se houver erro de indexação
             rsi_atual = None
     else:
         rsi_atual = None
@@ -291,6 +304,7 @@ def calcular_sinal_rsi(rsi_atual):
 with st.spinner('Carregando cotações das Blue Chips...'):
     df_mercado = carregar_dados_mercado(tickers_monitor)
 
+# Verifica se o DataFrame não está vazio
 if not df_mercado.empty:
     def color_change(val):
         color = 'green' if val > 0 else 'red' if val < 0 else 'gray'
@@ -326,6 +340,7 @@ st.divider()
 # --- SEÇÃO DE PESQUISA E DETALHES ---
 st.header("🕵️‍♂️ Investigar Outros Ativos")
 
+# 1. Campo de Pesquisa para qualquer ativo COM BOTÃO
 col_input, col_btn = st.columns([3, 1])
 
 with col_input:
@@ -335,23 +350,28 @@ with col_btn:
     st.markdown("<br>", unsafe_allow_html=True) 
     st.button("🔍 Pesquisar", key="btn_pesquisa", use_container_width=True)
 
-# --- DETERMINAÇÃO DO ATIVO PARA ANÁLISE ---
+# --- DETERMINAÇÃO DO ATIVO PARA ANÁLISE (ESTABILIZADO) ---
 ativo_analise = None 
 
+# 1. Prioridade: Busca Manual (termo_busca)
 if termo_busca:
     ativo_analise = termo_busca
         
+# 2. Secundário: Selectbox/Ativo Padrão (só se NADA foi digitado)
 elif not df_mercado.empty:
     st.subheader("Ou escolha um ativo da lista:")
     opcoes_select = df_mercado['Ativo'].unique()
     
     if len(opcoes_select) > 0:
         
+        # 1. Define o valor inicial/index para o selectbox
         if "selectbox_selecionado" not in st.session_state or st.session_state["selectbox_selecionado"] not in opcoes_select:
              st.session_state["selectbox_selecionado"] = opcoes_select[0] 
             
+        # Pega o índice do ativo que está atualmente no st.session_state
         index_selecionado = list(opcoes_select).index(st.session_state["selectbox_selecionado"])
 
+        # 2. Renderiza o selectbox
         ativo_analise = st.selectbox(
             "Escolha um ativo para ver detalhes:", 
             opcoes_select, 
@@ -373,7 +393,7 @@ if ativo_analise:
             ticker_valido = True
             
             if 'longName' in info_teste:
-                 ativo_analise_display = f"{info_teste['longName']} ({ativo_analise})"
+                 ativo_analise_display = info_teste['longName']
             
         else:
             raise ValueError("Ticker não encontrado ou sem dados suficientes.")
@@ -437,43 +457,44 @@ if ticker_valido:
         
     st.divider()
     
-    ## --- BLOCO DE ANÁLISE TÉCNICA (MMS 252) ---
+    # --- BLOCO DE ANÁLISE DE TENDÊNCIA DE CURTO PRAZO (MMS 20) ---
     st.subheader(f"📈 Análise Técnica ({ativo_analise})")
     
-    # 1. Carrega histórico de LONGO prazo (2 anos)
-    df_historico_longo = carregar_historico_longo(ativo_analise)
+    df_historico_curto = carregar_historico_curto(ativo_analise)
     
-    # 2. MMS 252 (CHAMADA DA FUNÇÃO RENOMEADA)
-    sinal_mms, emoji_mms, mms_series = calcular_sinal_mms_252(df_historico_longo)
-        
-    st.markdown(f"#### {emoji_mms} Média Móvel Simples de {MMS_LONG_PERIOD} Dias (Tendência Anual)")
+    # 1. MMS 20
+    sinal_mms, emoji_mms, mms_20_series = calcular_sinal_mms20(df_historico_curto)
+    
+    st.markdown(f"#### {emoji_mms} Média Móvel Simples de 20 Dias")
     st.markdown(sinal_mms)
-    st.caption("Compara o preço atual com a média dos últimos 12 meses (252 dias úteis) para identificar a tendência primária de longo prazo.")
+    st.caption("Compara o preço atual com a média dos últimos 20 dias úteis.")
     
-    # EXIBIÇÃO DO GRÁFICO MMS 252
-    if not df_historico_longo.empty and len(mms_series) > 0 and not mms_series.empty:
-        st.markdown(f"##### Visualização da Tendência (MMS {MMS_LONG_PERIOD})")
+    # EXIBIÇÃO DO GRÁFICO MMS 20 
+    if not df_historico_curto.empty and len(mms_20_series) > 0 and not mms_20_series.empty:
+        st.markdown("##### Visualização da Tendência (MMS 20)")
         
+        # Garante que os arrays sejam 1D para evitar erros de dimensão
         df_plot = pd.DataFrame({
-            'Preço de Fechamento': df_historico_longo.values.ravel(),
-            f'MMS {MMS_LONG_PERIOD} Períodos': mms_series.values.ravel() 
-        }, index=df_historico_longo.index)
+            'Preço de Fechamento': df_historico_curto.values.ravel(),
+            'MMS 20 Períodos': mms_20_series.values.ravel()
+        }, index=df_historico_curto.index) 
         
-        df_plot = df_plot.dropna() 
+        df_plot = df_plot.dropna() # Remove NaNs iniciais da MMS 20
         
         if not df_plot.empty:
-            st.line_chart(df_plot.tail(MMS_LONG_PERIOD)) 
+            st.line_chart(df_plot.tail(60)) 
         else:
-            st.info(f"Não foi possível carregar dados suficientes para plotar o MMS {MMS_LONG_PERIOD}.")
+             st.info("Não foi possível carregar dados suficientes para plotar o MMS 20.")
 
     else:
-        st.info(f"Não foi possível carregar dados suficientes para calcular e plotar o MMS {MMS_LONG_PERIOD} (Requer 252 dias).")
+         st.info("Não foi possível carregar dados suficientes para calcular e plotar o MMS 20 (Requer 20 dias).")
 
 
     st.markdown("---")
     
     # --- BLOCO DE ANÁLISE IFR ---
-    rsi_series, rsi_atual = calcular_rsi(df_historico_longo)
+    # 2. IFR 14
+    rsi_series, rsi_atual = calcular_rsi(df_historico_curto)
     sinal_rsi, emoji_rsi = calcular_sinal_rsi(rsi_atual)
 
     st.markdown(f"#### {emoji_rsi} Índice de Força Relativa (IFR 14)")
@@ -484,6 +505,7 @@ if ticker_valido:
     if not rsi_series.empty:
         st.markdown("##### Visualização do IFR")
         
+        # CORREÇÃO APLICADA: Usa .values.ravel() para garantir que a Series seja 1D e passa o índice
         df_rsi_plot = pd.DataFrame({
             'IFR 14': rsi_series.values.ravel(),
             'Sobrecompra (70)': np.full(len(rsi_series), 70),
@@ -524,4 +546,5 @@ else:
     if df_mercado.empty:
         st.error("Não foi possível carregar os dados iniciais do mercado. Verifique sua conexão ou tente mais tarde.")
     else:
-        st.info("Digite um código de ativo ou escolha um da lista para iniciar a análise detalhada.")
+        st.info("Digite um código de ativo ou escolha um da lista para iniciar a análise detalhada.")     
+
